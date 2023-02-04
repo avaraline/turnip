@@ -19,9 +19,11 @@ class Command(enum.IntEnum):
     REQUEST = 2
     PUNCH = 3
 
-    def packet(self, addr: tuple[str, int]) -> bytes:
+    def packet(self, addr: tuple[str, int], port: int = 0) -> bytes:
         return (
-            bytes([self.value]) + socket.inet_aton(addr[0]) + struct.pack("!H", addr[1])
+            bytes([self.value])
+            + socket.inet_aton(addr[0])
+            + struct.pack("!HH", addr[1], port)
         )
 
 
@@ -39,10 +41,11 @@ class TurnipProtocol(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]):
-        if len(data) != 7:
+        if len(data) != 9:
             return
         cmd = Command(data[0])
-        local = unpack_address(data[1:])
+        local = unpack_address(data[1:7])
+        port = struct.unpack("!H", data[7:9])[0]
         match cmd:
             case Command.PING:
                 # Register this client using it's remote IP and local port. If we ever
@@ -52,22 +55,30 @@ class TurnipProtocol(asyncio.DatagramProtocol):
                 # Store which port the client is using for punch packets, so we can
                 # send requests back through that. Also track the last time the client
                 # was seen, so we can expire them.
-                self.known[key] = (addr[1], time.time())
+                self.known.setdefault(key, {}).update({addr[1]: time.time()})
             case Command.REQUEST:
                 if local in self.known:
-                    punch_addr = (local[0], self.known[local][0])
-                    open_addr = (addr[0], local[1])
-                    print("Requesting {} to open {}".format(punch_addr, open_addr))
-                    self.transport.sendto(Command.PUNCH.packet(open_addr), punch_addr)
+                    for punch_port in self.known[local].keys():
+                        punch_addr = (local[0], punch_port)
+                        open_addr = (addr[0], port)
+                        print("Requesting {} to open {}".format(punch_addr, open_addr))
+                        self.transport.sendto(
+                            Command.PUNCH.packet(open_addr), punch_addr
+                        )
                 else:
                     print("Unknown client: {}".format(local))
 
     def expire(self, timeout):
-        self.known = {
-            key: (port, last_seen)
-            for key, (port, last_seen) in self.known.items()
-            if (time.time() - last_seen) < timeout
-        }
+        expired = []
+        for key, ports in self.known.items():
+            for port, last_seen in ports.items():
+                if (time.time() - last_seen) >= timeout:
+                    print("Expiring {}[{}]".format(key, port))
+                    expired.append((key, port))
+        for key, port in expired:
+            del self.known[key][port]
+            if not self.known[key]:
+                del self.known[key]
 
 
 async def main():
