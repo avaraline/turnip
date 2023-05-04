@@ -47,6 +47,8 @@ class TurnipProtocol(asyncio.DatagramProtocol):
         connaddr = unpack_address(data[1:])
         match cmd:
             case Command.PING:
+                if addr not in self.known:
+                    print("Registering {}".format(addr))
                 self.known[addr] = time.time()
             case Command.REQUEST:
                 if connaddr in self.known:
